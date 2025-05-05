@@ -1,6 +1,6 @@
 import json
 import os
-from typing import IO
+from typing import IO, Any
 from unittest import mock
 
 import aiohttp
@@ -14,7 +14,7 @@ from azure.search.documents.aio import SearchClient
 from azure.search.documents.indexes.aio import SearchIndexClient
 from azure.search.documents.indexes.models import SearchField, SearchIndex
 from azure.storage.blob.aio import ContainerClient
-from openai.types import CreateEmbeddingResponse, Embedding
+from openai.types import CompletionUsage, CreateEmbeddingResponse, Embedding
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.chat.chat_completion import (
     ChatCompletionMessage,
@@ -54,7 +54,7 @@ async def mock_search(self, *args, **kwargs):
 
 
 @pytest.fixture
-def mock_compute_embeddings_call(monkeypatch):
+def mock_azurehttp_calls(monkeypatch):
     def mock_post(*args, **kwargs):
         if kwargs.get("url").endswith("computervision/retrieval:vectorizeText"):
             return mock_computervision_response()
@@ -108,9 +108,9 @@ def mock_openai_embedding(monkeypatch):
 @pytest.fixture
 def mock_openai_chatcompletion(monkeypatch):
     class AsyncChatCompletionIterator:
-        def __init__(self, answer: str):
+        def __init__(self, answer: str, reasoning: bool, usage: dict[str, Any]):
             chunk_id = "test-id"
-            model = "gpt-35-turbo"
+            model = "gpt-4o-mini" if not reasoning else "o3-mini"
             self.responses = [
                 {"object": "chat.completion.chunk", "choices": [], "id": chunk_id, "model": model, "created": 1},
                 {
@@ -170,6 +170,17 @@ def mock_openai_chatcompletion(monkeypatch):
                     }
                 )
 
+            self.responses.append(
+                {
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                    "id": chunk_id,
+                    "model": model,
+                    "created": 1,
+                    "usage": usage,
+                }
+            )
+
         def __aiter__(self):
             return self
 
@@ -184,19 +195,32 @@ def mock_openai_chatcompletion(monkeypatch):
         assert kwargs.get("seed") is None or kwargs.get("seed") == 42
 
         messages = kwargs["messages"]
+        model = kwargs["model"]
+        reasoning = model == "o3-mini"
+        completion_usage: dict[str, any] = {
+            "completion_tokens": 896,
+            "prompt_tokens": 23,
+            "total_tokens": 919,
+            "completion_tokens_details": {
+                "accepted_prediction_tokens": 0,
+                "audio_tokens": 0,
+                "reasoning_tokens": 384 if reasoning else 0,
+                "rejected_prediction_tokens": 0,
+            },
+        }
         last_question = messages[-1]["content"]
         if last_question == "Generate search query for: What is the capital of France?":
             answer = "capital of France"
         elif last_question == "Generate search query for: Are interest rates high?":
             answer = "interest rates"
-        elif isinstance(last_question, list) and last_question[2].get("image_url"):
+        elif isinstance(last_question, list) and any([part.get("image_url") for part in last_question]):
             answer = "From the provided sources, the impact of interest rates and GDP growth on financial markets can be observed through the line graph. [Financial Market Analysis Report 2023-7.png]"
         else:
             answer = "The capital of France is Paris. [Benefit_Options-2.pdf]."
             if messages[0]["content"].find("Generate 3 very brief follow-up questions") > -1:
                 answer = "The capital of France is Paris. [Benefit_Options-2.pdf]. <<What is the capital of Spain?>>"
         if "stream" in kwargs and kwargs["stream"] is True:
-            return AsyncChatCompletionIterator(answer)
+            return AsyncChatCompletionIterator(answer, reasoning, completion_usage)
         else:
             return ChatCompletion(
                 object="chat.completion",
@@ -208,6 +232,7 @@ def mock_openai_chatcompletion(monkeypatch):
                 id="test-123",
                 created=0,
                 model="test-model",
+                usage=CompletionUsage.model_validate(completion_usage),
             )
 
     def patch(openai_client):
@@ -292,6 +317,24 @@ auth_public_envs = [
     },
 ]
 
+reasoning_envs = [
+    {
+        "OPENAI_HOST": "azure",
+        "AZURE_OPENAI_SERVICE": "test-openai-service",
+        "AZURE_OPENAI_CHATGPT_MODEL": "o3-mini",
+        "AZURE_OPENAI_CHATGPT_DEPLOYMENT": "o3-mini",
+        "AZURE_OPENAI_EMB_DEPLOYMENT": "test-ada",
+    },
+    {
+        "OPENAI_HOST": "azure",
+        "AZURE_OPENAI_SERVICE": "test-openai-service",
+        "AZURE_OPENAI_CHATGPT_MODEL": "o3-mini",
+        "AZURE_OPENAI_CHATGPT_DEPLOYMENT": "o3-mini",
+        "AZURE_OPENAI_EMB_DEPLOYMENT": "test-ada",
+        "AZURE_OPENAI_REASONING_EFFORT": "low",
+    },
+]
+
 
 @pytest.fixture(params=envs, ids=["client0", "client1"])
 def mock_env(monkeypatch, request):
@@ -307,7 +350,7 @@ def mock_env(monkeypatch, request):
         monkeypatch.setenv("AZURE_SEARCH_SERVICE", "test-search-service")
         monkeypatch.setenv("AZURE_SPEECH_SERVICE_ID", "test-id")
         monkeypatch.setenv("AZURE_SPEECH_SERVICE_LOCATION", "eastus")
-        monkeypatch.setenv("AZURE_OPENAI_CHATGPT_MODEL", "gpt-35-turbo")
+        monkeypatch.setenv("AZURE_OPENAI_CHATGPT_MODEL", "gpt-4o-mini")
         monkeypatch.setenv("ALLOWED_ORIGIN", "https://frontend.com")
         for key, value in request.param.items():
             monkeypatch.setenv(key, value)
@@ -319,7 +362,31 @@ def mock_env(monkeypatch, request):
             yield
 
 
-@pytest_asyncio.fixture()
+@pytest.fixture(params=reasoning_envs, ids=["reasoning_client0", "reasoning_client1"])
+def mock_reasoning_env(monkeypatch, request):
+    with mock.patch.dict(os.environ, clear=True):
+        monkeypatch.setenv("AZURE_STORAGE_ACCOUNT", "test-storage-account")
+        monkeypatch.setenv("AZURE_STORAGE_CONTAINER", "test-storage-container")
+        monkeypatch.setenv("AZURE_STORAGE_RESOURCE_GROUP", "test-storage-rg")
+        monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "test-storage-subid")
+        monkeypatch.setenv("ENABLE_LANGUAGE_PICKER", "true")
+        monkeypatch.setenv("USE_SPEECH_INPUT_BROWSER", "true")
+        monkeypatch.setenv("USE_SPEECH_OUTPUT_AZURE", "true")
+        monkeypatch.setenv("AZURE_SEARCH_INDEX", "test-search-index")
+        monkeypatch.setenv("AZURE_SEARCH_SERVICE", "test-search-service")
+        monkeypatch.setenv("AZURE_SPEECH_SERVICE_ID", "test-id")
+        monkeypatch.setenv("AZURE_SPEECH_SERVICE_LOCATION", "eastus")
+        monkeypatch.setenv("ALLOWED_ORIGIN", "https://frontend.com")
+        monkeypatch.setenv("TEST_ENABLE_REASONING", "true")
+        for key, value in request.param.items():
+            monkeypatch.setenv(key, value)
+
+        with mock.patch("app.AzureDeveloperCliCredential") as mock_default_azure_credential:
+            mock_default_azure_credential.return_value = MockAzureCredential()
+            yield
+
+
+@pytest_asyncio.fixture(scope="function")
 async def client(
     monkeypatch,
     mock_env,
@@ -327,7 +394,7 @@ async def client(
     mock_openai_embedding,
     mock_acs_search,
     mock_blob_container_client,
-    mock_compute_embeddings_call,
+    mock_azurehttp_calls,
 ):
     quart_app = app.create_app()
 
@@ -338,7 +405,26 @@ async def client(
         yield test_app.test_client()
 
 
-@pytest_asyncio.fixture()
+@pytest_asyncio.fixture(scope="function")
+async def reasoning_client(
+    monkeypatch,
+    mock_reasoning_env,
+    mock_openai_chatcompletion,
+    mock_openai_embedding,
+    mock_acs_search,
+    mock_blob_container_client,
+    mock_azurehttp_calls,
+):
+    quart_app = app.create_app()
+
+    async with quart_app.test_app() as test_app:
+        test_app.app.config.update({"TESTING": True})
+        mock_openai_chatcompletion(test_app.app.config[app.CONFIG_OPENAI_CLIENT])
+        mock_openai_embedding(test_app.app.config[app.CONFIG_OPENAI_CLIENT])
+        yield test_app.test_client()
+
+
+@pytest_asyncio.fixture(scope="function")
 async def client_with_expiring_token(
     monkeypatch,
     mock_env,
@@ -346,7 +432,7 @@ async def client_with_expiring_token(
     mock_openai_embedding,
     mock_acs_search,
     mock_blob_container_client,
-    mock_compute_embeddings_call,
+    mock_azurehttp_calls,
 ):
     quart_app = app.create_app()
 
@@ -358,7 +444,7 @@ async def client_with_expiring_token(
         yield test_app.test_client()
 
 
-@pytest_asyncio.fixture(params=auth_envs)
+@pytest_asyncio.fixture(params=auth_envs, scope="function")
 async def auth_client(
     monkeypatch,
     mock_openai_chatcompletion,
@@ -373,7 +459,7 @@ async def auth_client(
     monkeypatch.setenv("AZURE_STORAGE_CONTAINER", "test-storage-container")
     monkeypatch.setenv("AZURE_SEARCH_INDEX", "test-search-index")
     monkeypatch.setenv("AZURE_SEARCH_SERVICE", "test-search-service")
-    monkeypatch.setenv("AZURE_OPENAI_CHATGPT_MODEL", "gpt-35-turbo")
+    monkeypatch.setenv("AZURE_OPENAI_CHATGPT_MODEL", "gpt-4o-mini")
     monkeypatch.setenv("USE_USER_UPLOAD", "true")
     monkeypatch.setenv("AZURE_USERSTORAGE_ACCOUNT", "test-userstorage-account")
     monkeypatch.setenv("AZURE_USERSTORAGE_CONTAINER", "test-userstorage-container")
@@ -397,7 +483,7 @@ async def auth_client(
             yield client
 
 
-@pytest_asyncio.fixture(params=auth_public_envs)
+@pytest_asyncio.fixture(params=auth_public_envs, scope="function")
 async def auth_public_documents_client(
     monkeypatch,
     mock_openai_chatcompletion,
@@ -412,13 +498,19 @@ async def auth_public_documents_client(
     monkeypatch.setenv("AZURE_STORAGE_CONTAINER", "test-storage-container")
     monkeypatch.setenv("AZURE_SEARCH_INDEX", "test-search-index")
     monkeypatch.setenv("AZURE_SEARCH_SERVICE", "test-search-service")
-    monkeypatch.setenv("AZURE_OPENAI_CHATGPT_MODEL", "gpt-35-turbo")
+    monkeypatch.setenv("AZURE_OPENAI_CHATGPT_MODEL", "gpt-4o-mini")
     monkeypatch.setenv("USE_USER_UPLOAD", "true")
     monkeypatch.setenv("AZURE_USERSTORAGE_ACCOUNT", "test-userstorage-account")
     monkeypatch.setenv("AZURE_USERSTORAGE_CONTAINER", "test-userstorage-container")
     monkeypatch.setenv("USE_LOCAL_PDF_PARSER", "true")
     monkeypatch.setenv("USE_LOCAL_HTML_PARSER", "true")
     monkeypatch.setenv("AZURE_DOCUMENTINTELLIGENCE_SERVICE", "test-documentintelligence-service")
+    monkeypatch.setenv("USE_CHAT_HISTORY_COSMOS", "true")
+    monkeypatch.setenv("AZURE_COSMOSDB_ACCOUNT", "test-cosmosdb-account")
+    monkeypatch.setenv("AZURE_CHAT_HISTORY_DATABASE", "test-cosmosdb-database")
+    monkeypatch.setenv("AZURE_CHAT_HISTORY_CONTAINER", "test-cosmosdb-container")
+    monkeypatch.setenv("AZURE_CHAT_HISTORY_VERSION", "cosmosdb-v2")
+
     for key, value in request.param.items():
         monkeypatch.setenv(key, value)
 

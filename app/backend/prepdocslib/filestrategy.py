@@ -1,10 +1,13 @@
 import logging
-from typing import List, Optional
+from typing import Optional
+
+from azure.core.credentials import AzureKeyCredential
 
 from .blobmanager import BlobManager
 from .embeddings import ImageEmbeddings, OpenAIEmbeddings
 from .fileprocessor import FileProcessor
 from .listfilestrategy import File, ListFileStrategy
+from .mediadescriber import ContentUnderstandingDescriber
 from .searchmanager import SearchManager, Section
 from .strategy import DocumentAction, SearchInfo, Strategy
 
@@ -16,7 +19,7 @@ async def parse_file(
     file_processors: dict[str, FileProcessor],
     category: Optional[str] = None,
     image_embeddings: Optional[ImageEmbeddings] = None,
-) -> List[Section]:
+) -> list[Section]:
     key = file.file_extension().lower()
     processor = file_processors.get(key)
     if processor is None:
@@ -50,6 +53,8 @@ class FileStrategy(Strategy):
         search_analyzer_name: Optional[str] = None,
         use_acls: bool = False,
         category: Optional[str] = None,
+        use_content_understanding: bool = False,
+        content_understanding_endpoint: Optional[str] = None,
     ):
         self.list_file_strategy = list_file_strategy
         self.blob_manager = blob_manager
@@ -61,6 +66,8 @@ class FileStrategy(Strategy):
         self.search_info = search_info
         self.use_acls = use_acls
         self.category = category
+        self.use_content_understanding = use_content_understanding
+        self.content_understanding_endpoint = content_understanding_endpoint
 
     async def setup(self):
         search_manager = SearchManager(
@@ -73,6 +80,16 @@ class FileStrategy(Strategy):
         )
         await search_manager.create_index()
 
+        if self.use_content_understanding:
+            if self.content_understanding_endpoint is None:
+                raise ValueError("Content Understanding is enabled but no endpoint was provided")
+            if isinstance(self.search_info.credential, AzureKeyCredential):
+                raise ValueError(
+                    "AzureKeyCredential is not supported for Content Understanding, use keyless auth instead"
+                )
+            cu_manager = ContentUnderstandingDescriber(self.content_understanding_endpoint, self.search_info.credential)
+            await cu_manager.create_analyzer()
+
     async def run(self):
         search_manager = SearchManager(
             self.search_info, self.search_analyzer_name, self.use_acls, False, self.embeddings
@@ -84,7 +101,7 @@ class FileStrategy(Strategy):
                     sections = await parse_file(file, self.file_processors, self.category, self.image_embeddings)
                     if sections:
                         blob_sas_uris = await self.blob_manager.upload_blob(file)
-                        blob_image_embeddings: Optional[List[List[float]]] = None
+                        blob_image_embeddings: Optional[list[list[float]]] = None
                         if self.image_embeddings and blob_sas_uris:
                             blob_image_embeddings = await self.image_embeddings.create_embeddings(blob_sas_uris)
                         await search_manager.update_content(sections, blob_image_embeddings, url=file.url)

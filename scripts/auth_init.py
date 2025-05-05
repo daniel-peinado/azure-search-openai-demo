@@ -3,7 +3,7 @@ import datetime
 import os
 import random
 import subprocess
-from typing import Tuple
+import uuid
 
 from azure.identity.aio import AzureDeveloperCliCredential
 from msgraph import GraphServiceClient
@@ -25,10 +25,14 @@ from auth_common import get_application, test_authentication_enabled
 from load_azd_env import load_azd_env
 
 
-async def create_application(graph_client: GraphServiceClient, request_app: Application) -> Tuple[str, str]:
+async def create_application(graph_client: GraphServiceClient, request_app: Application) -> tuple[str, str]:
     app = await graph_client.applications.post(request_app)
+    if app is None:
+        raise ValueError("Failed to create application")
     object_id = app.id
     client_id = app.app_id
+    if object_id is None or client_id is None:
+        raise ValueError("Created application has no ID or client ID")
 
     # Create a service principal
     request_principal = ServicePrincipal(app_id=client_id, display_name=app.display_name)
@@ -40,13 +44,17 @@ async def add_client_secret(graph_client: GraphServiceClient, app_id: str) -> st
     request_password = AddPasswordPostRequestBody(
         password_credential=PasswordCredential(display_name="WebAppSecret"),
     )
-    result = await graph_client.applications.by_application_id(app_id).add_password.post(request_password)
-    return result.secret_text
+    password_credential = await graph_client.applications.by_application_id(app_id).add_password.post(request_password)
+    if password_credential is None:
+        raise ValueError("Failed to create client secret")
+    if password_credential.secret_text is None:
+        raise ValueError("Created client secret has no secret text")
+    return password_credential.secret_text
 
 
 async def create_or_update_application_with_secret(
     graph_client: GraphServiceClient, app_id_env_var: str, app_secret_env_var: str, request_app: Application
-) -> Tuple[str, str, bool]:
+) -> tuple[str, str, bool]:
     app_id = os.getenv(app_id_env_var, "no-id")
     created_app = False
     object_id = None
@@ -72,7 +80,7 @@ async def create_or_update_application_with_secret(
 
 
 def update_azd_env(name, val):
-    subprocess.run(f"azd env set {name} {val}", shell=True)
+    subprocess.run(f'azd env set {name} "{val}"', shell=True)
 
 
 def random_app_identifier():
@@ -94,7 +102,7 @@ def server_app_permission_setup(server_app_id: str) -> Application:
             known_client_applications=[],
             oauth2_permission_scopes=[
                 PermissionScope(
-                    id="7b207263-0c4a-4127-a6fe-38ea8c8cd1a7",
+                    id=uuid.UUID("{7b207263-0c4a-4127-a6fe-38ea8c8cd1a7}"),
                     admin_consent_display_name="Access Azure Search OpenAI Chat API",
                     admin_consent_description="Allows the app to access Azure Search OpenAI Chat API as the signed-in user.",
                     user_consent_display_name="Access Azure Search OpenAI Chat API",
@@ -111,15 +119,15 @@ def server_app_permission_setup(server_app_id: str) -> Application:
                 resource_app_id="00000003-0000-0000-c000-000000000000",
                 resource_access=[
                     # Graph User.Read
-                    ResourceAccess(id="e1fe6dd8-ba31-4d61-89e7-88639da4683d", type="Scope"),
+                    ResourceAccess(id=uuid.UUID("{e1fe6dd8-ba31-4d61-89e7-88639da4683d}"), type="Scope"),
                     # Graph email
-                    ResourceAccess(id="64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0", type="Scope"),
+                    ResourceAccess(id=uuid.UUID("{64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0}"), type="Scope"),
                     # Graph offline_access
-                    ResourceAccess(id="7427e0e9-2fba-42fe-b0c0-848c9e6a8182", type="Scope"),
+                    ResourceAccess(id=uuid.UUID("{7427e0e9-2fba-42fe-b0c0-848c9e6a8182}"), type="Scope"),
                     # Graph openid
-                    ResourceAccess(id="37f7f235-527c-4136-accd-4a02d197296e", type="Scope"),
+                    ResourceAccess(id=uuid.UUID("{37f7f235-527c-4136-accd-4a02d197296e}"), type="Scope"),
                     # Graph profile
-                    ResourceAccess(id="14dad69e-099b-42c9-810b-d002981feec1", type="Scope"),
+                    ResourceAccess(id=uuid.UUID("{14dad69e-099b-42c9-810b-d002981feec1}"), type="Scope"),
                 ],
             )
         ],
@@ -128,6 +136,10 @@ def server_app_permission_setup(server_app_id: str) -> Application:
 
 
 def client_app(server_app_id: str, server_app: Application, identifier: int) -> Application:
+    if server_app.api is None:
+        raise ValueError("Server app does not have an API")
+    if server_app.api.oauth2_permission_scopes is None or len(server_app.api.oauth2_permission_scopes) == 0:
+        raise ValueError("Server app does not have any permission scopes")
     return Application(
         display_name=f"Azure Search OpenAI Chat Client App {identifier}",
         sign_in_audience="AzureADMyOrg",
@@ -150,7 +162,7 @@ def client_app(server_app_id: str, server_app: Application, identifier: int) -> 
             RequiredResourceAccess(
                 resource_app_id="00000003-0000-0000-c000-000000000000",
                 resource_access=[
-                    ResourceAccess(id="e1fe6dd8-ba31-4d61-89e7-88639da4683d", type="Scope"),
+                    ResourceAccess(id=uuid.UUID("e1fe6dd8-ba31-4d61-89e7-88639da4683d"), type="Scope"),
                 ],
             ),
         ],
@@ -160,7 +172,7 @@ def client_app(server_app_id: str, server_app: Application, identifier: int) -> 
 def server_app_known_client_application(client_app_id: str) -> Application:
     return Application(
         api=ApiApplication(
-            known_client_applications=[client_app_id],
+            known_client_applications=[uuid.UUID(f"{client_app_id}")],
         )
     )
 

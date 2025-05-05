@@ -8,6 +8,7 @@ from azure.search.documents.models import (
 from openai.types.chat import ChatCompletion
 
 from approaches.chatreadretrievereadvision import ChatReadRetrieveReadVisionApproach
+from approaches.promptmanager import PromptyManager
 from core.authentication import AuthenticationHelper
 
 from .mocks import MOCK_EMBEDDING_DIMENSIONS, MOCK_EMBEDDING_MODEL_NAME
@@ -52,7 +53,7 @@ def chat_approach(openai_client, mock_confidential_client_success):
         blob_container_client=None,
         vision_endpoint="endpoint",
         vision_token_provider=lambda: "token",
-        chatgpt_model="gpt-35-turbo",
+        chatgpt_model="gpt-4o-mini",
         chatgpt_deployment="chat",
         gpt4v_deployment="gpt-4v",
         gpt4v_model="gpt-4v",
@@ -63,6 +64,7 @@ def chat_approach(openai_client, mock_confidential_client_success):
         content_field="",
         query_language="en-us",
         query_speller="lexicon",
+        prompt_manager=PromptyManager(),
     )
 
 
@@ -77,7 +79,7 @@ def test_get_search_query(chat_approach):
 	"id": "chatcmpl-81JkxYqYppUkPtOAia40gki2vJ9QM",
 	"object": "chat.completion",
 	"created": 1695324963,
-	"model": "gpt-35-turbo",
+	"model": "gpt-4o-mini",
 	"prompt_filter_results": [
 		{
 			"prompt_index": 0,

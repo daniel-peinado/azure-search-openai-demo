@@ -1,12 +1,12 @@
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from azure.search.documents.aio import SearchClient
 from azure.search.documents.models import VectorQuery
 from openai import AsyncOpenAI
-from openai.types.chat import ChatCompletionMessageParam
-from openai_messages_token_helper import build_messages, get_token_limit
+from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 
-from approaches.approach import Approach, ThoughtStep
+from approaches.approach import Approach, DataPoints, ExtraInfo, ThoughtStep
+from approaches.promptmanager import PromptManager
 from core.authentication import AuthenticationHelper
 
 
@@ -16,26 +16,6 @@ class RetrieveThenReadApproach(Approach):
     top documents from search, then constructs a prompt with them, and then uses OpenAI to generate an completion
     (answer) with that prompt.
     """
-
-    system_chat_template = (
-        "You are an intelligent assistant helping Contoso Inc employees with their healthcare plan questions and employee handbook questions. "
-        + "Use 'you' to refer to the individual asking the questions even if they ask with 'I'. "
-        + "Answer the following question using only the data provided in the sources below. "
-        + "Each source has a name followed by colon and the actual information, always include the source name for each fact you use in the response. "
-        + "If you cannot answer using the sources below, say you don't know. Use below example to answer"
-    )
-
-    # shots/sample conversation
-    question = """
-'What is the deductible for the employee plan for a visit to Overlake in Bellevue?'
-
-Sources:
-info1.txt: deductibles depend on whether you are in-network or out-of-network. In-network deductibles are $500 for employee and $1000 for family. Out-of-network deductibles are $1000 for employee and $2000 for family.
-info2.pdf: Overlake is in-network for the employee plan.
-info3.pdf: Overlake is the name of the area that includes a park and ride near Bellevue.
-info4.pdf: In-network institutions include Overlake, Swedish and others in the region
-"""
-    answer = "In-network deductibles are $500 for employee and $1000 for family [info1.txt] and Overlake is in-network for the employee plan [info2.pdf][info4.pdf]."
 
     def __init__(
         self,
@@ -52,6 +32,8 @@ info4.pdf: In-network institutions include Overlake, Swedish and others in the r
         content_field: str,
         query_language: str,
         query_speller: str,
+        prompt_manager: PromptManager,
+        reasoning_effort: Optional[str] = None,
     ):
         self.search_client = search_client
         self.chatgpt_deployment = chatgpt_deployment
@@ -66,7 +48,10 @@ info4.pdf: In-network institutions include Overlake, Swedish and others in the r
         self.content_field = content_field
         self.query_language = query_language
         self.query_speller = query_speller
-        self.chatgpt_token_limit = get_token_limit(chatgpt_model, self.ALLOW_NON_GPT_MODELS)
+        self.prompt_manager = prompt_manager
+        self.answer_prompt = self.prompt_manager.load_prompt("ask_answer_question.prompty")
+        self.reasoning_effort = reasoning_effort
+        self.include_token_usage = True
 
     async def run(
         self,
@@ -78,11 +63,11 @@ info4.pdf: In-network institutions include Overlake, Swedish and others in the r
         if not isinstance(q, str):
             raise ValueError("The most recent message content must be a string.")
         overrides = context.get("overrides", {})
-        seed = overrides.get("seed", None)
         auth_claims = context.get("auth_claims", {})
         use_text_search = overrides.get("retrieval_mode") in ["text", "hybrid", None]
         use_vector_search = overrides.get("retrieval_mode") in ["vectors", "hybrid", None]
         use_semantic_ranker = True if overrides.get("semantic_ranker") else False
+        use_query_rewriting = True if overrides.get("query_rewriting") else False
         use_semantic_captions = True if overrides.get("semantic_captions") else False
         top = overrides.get("top", 3)
         minimum_search_score = overrides.get("minimum_search_score", 0.0)
@@ -105,45 +90,38 @@ info4.pdf: In-network institutions include Overlake, Swedish and others in the r
             use_semantic_captions,
             minimum_search_score,
             minimum_reranker_score,
+            use_query_rewriting,
         )
 
         # Process results
-        sources_content = self.get_sources_content(results, use_semantic_captions, use_image_citation=False)
-
-        # Append user message
-        content = "\n".join(sources_content)
-        user_content = q + "\n" + f"Sources:\n {content}"
-
-        response_token_limit = 1024
-        updated_messages = build_messages(
-            model=self.chatgpt_model,
-            system_prompt=overrides.get("prompt_template", self.system_chat_template),
-            few_shots=[{"role": "user", "content": self.question}, {"role": "assistant", "content": self.answer}],
-            new_user_content=user_content,
-            max_tokens=self.chatgpt_token_limit - response_token_limit,
-            fallback_to_default=self.ALLOW_NON_GPT_MODELS,
+        text_sources = self.get_sources_content(results, use_semantic_captions, use_image_citation=False)
+        messages = self.prompt_manager.render_prompt(
+            self.answer_prompt,
+            self.get_system_prompt_variables(overrides.get("prompt_template"))
+            | {"user_query": q, "text_sources": text_sources},
         )
 
-        chat_completion = await self.openai_client.chat.completions.create(
-            # Azure OpenAI takes the deployment name as the model name
-            model=self.chatgpt_deployment if self.chatgpt_deployment else self.chatgpt_model,
-            messages=updated_messages,
-            temperature=overrides.get("temperature", 0.3),
-            max_tokens=response_token_limit,
-            n=1,
-            seed=seed,
+        chat_completion = cast(
+            ChatCompletion,
+            await self.create_chat_completion(
+                self.chatgpt_deployment,
+                self.chatgpt_model,
+                messages=messages,
+                overrides=overrides,
+                response_token_limit=self.get_response_token_limit(self.chatgpt_model, 1024),
+            ),
         )
 
-        data_points = {"text": sources_content}
-        extra_info = {
-            "data_points": data_points,
-            "thoughts": [
+        extra_info = ExtraInfo(
+            DataPoints(text=text_sources),
+            thoughts=[
                 ThoughtStep(
                     "Search using user query",
                     q,
                     {
                         "use_semantic_captions": use_semantic_captions,
                         "use_semantic_ranker": use_semantic_ranker,
+                        "use_query_rewriting": use_query_rewriting,
                         "top": top,
                         "filter": filter,
                         "use_vector_search": use_vector_search,
@@ -154,17 +132,16 @@ info4.pdf: In-network institutions include Overlake, Swedish and others in the r
                     "Search results",
                     [result.serialize_for_results() for result in results],
                 ),
-                ThoughtStep(
-                    "Prompt to generate answer",
-                    updated_messages,
-                    (
-                        {"model": self.chatgpt_model, "deployment": self.chatgpt_deployment}
-                        if self.chatgpt_deployment
-                        else {"model": self.chatgpt_model}
-                    ),
+                self.format_thought_step_for_chatcompletion(
+                    title="Prompt to generate answer",
+                    messages=messages,
+                    overrides=overrides,
+                    model=self.chatgpt_model,
+                    deployment=self.chatgpt_deployment,
+                    usage=chat_completion.usage,
                 ),
             ],
-        }
+        )
 
         return {
             "message": {

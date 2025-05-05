@@ -1,6 +1,7 @@
 import logging
 from abc import ABC
-from typing import Awaitable, Callable, List, Optional, Union
+from collections.abc import Awaitable
+from typing import Callable, Optional, Union
 from urllib.parse import urljoin
 
 import aiohttp
@@ -25,7 +26,7 @@ class EmbeddingBatch:
     Represents a batch of text that is going to be embedded
     """
 
-    def __init__(self, texts: List[str], token_length: int):
+    def __init__(self, texts: list[str], token_length: int):
         self.texts = texts
         self.token_length = token_length
 
@@ -66,7 +67,7 @@ class OpenAIEmbeddings(ABC):
         encoding = tiktoken.encoding_for_model(self.open_ai_model_name)
         return len(encoding.encode(text))
 
-    def split_text_into_batches(self, texts: List[str]) -> List[EmbeddingBatch]:
+    def split_text_into_batches(self, texts: list[str]) -> list[EmbeddingBatch]:
         batch_info = OpenAIEmbeddings.SUPPORTED_BATCH_AOAI_MODEL.get(self.open_ai_model_name)
         if not batch_info:
             raise NotImplementedError(
@@ -75,8 +76,8 @@ class OpenAIEmbeddings(ABC):
 
         batch_token_limit = batch_info["token_limit"]
         batch_max_size = batch_info["max_batch_size"]
-        batches: List[EmbeddingBatch] = []
-        batch: List[str] = []
+        batches: list[EmbeddingBatch] = []
+        batch: list[str] = []
         batch_token_length = 0
         for text in texts:
             text_token_length = self.calculate_token_length(text)
@@ -97,7 +98,7 @@ class OpenAIEmbeddings(ABC):
 
         return batches
 
-    async def create_embedding_batch(self, texts: List[str], dimensions_args: ExtraArgs) -> List[List[float]]:
+    async def create_embedding_batch(self, texts: list[str], dimensions_args: ExtraArgs) -> list[list[float]]:
         batches = self.split_text_into_batches(texts)
         embeddings = []
         client = await self.create_client()
@@ -121,7 +122,7 @@ class OpenAIEmbeddings(ABC):
 
         return embeddings
 
-    async def create_embedding_single(self, text: str, dimensions_args: ExtraArgs) -> List[float]:
+    async def create_embedding_single(self, text: str, dimensions_args: ExtraArgs) -> list[float]:
         client = await self.create_client()
         async for attempt in AsyncRetrying(
             retry=retry_if_exception_type(RateLimitError),
@@ -137,7 +138,7 @@ class OpenAIEmbeddings(ABC):
 
         return emb_response.data[0].embedding
 
-    async def create_embeddings(self, texts: List[str]) -> List[List[float]]:
+    async def create_embeddings(self, texts: list[str]) -> list[list[float]]:
 
         dimensions_args: ExtraArgs = (
             {"dimensions": self.open_ai_dimensions}
@@ -163,6 +164,7 @@ class AzureOpenAIEmbeddingService(OpenAIEmbeddings):
         open_ai_deployment: Union[str, None],
         open_ai_model_name: str,
         open_ai_dimensions: int,
+        open_ai_api_version: str,
         credential: Union[AsyncTokenCredential, AzureKeyCredential],
         open_ai_custom_url: Union[str, None] = None,
         disable_batch: bool = False,
@@ -176,6 +178,7 @@ class AzureOpenAIEmbeddingService(OpenAIEmbeddings):
         else:
             raise ValueError("Either open_ai_service or open_ai_custom_url must be provided")
         self.open_ai_deployment = open_ai_deployment
+        self.open_ai_api_version = open_ai_api_version
         self.credential = credential
 
     async def create_client(self) -> AsyncOpenAI:
@@ -196,7 +199,7 @@ class AzureOpenAIEmbeddingService(OpenAIEmbeddings):
         return AsyncAzureOpenAI(
             azure_endpoint=self.open_ai_endpoint,
             azure_deployment=self.open_ai_deployment,
-            api_version="2023-05-15",
+            api_version=self.open_ai_api_version,
             **auth_args,
         )
 
@@ -233,13 +236,13 @@ class ImageEmbeddings:
         self.token_provider = token_provider
         self.endpoint = endpoint
 
-    async def create_embeddings(self, blob_urls: List[str]) -> List[List[float]]:
+    async def create_embeddings(self, blob_urls: list[str]) -> list[list[float]]:
         endpoint = urljoin(self.endpoint, "computervision/retrieval:vectorizeImage")
         headers = {"Content-Type": "application/json"}
         params = {"api-version": "2023-02-01-preview", "modelVersion": "latest"}
         headers["Authorization"] = "Bearer " + await self.token_provider()
 
-        embeddings: List[List[float]] = []
+        embeddings: list[list[float]] = []
         async with aiohttp.ClientSession(headers=headers) as session:
             for blob_url in blob_urls:
                 async for attempt in AsyncRetrying(

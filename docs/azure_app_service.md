@@ -1,9 +1,9 @@
-# Deploying on Azure App Service
+# RAG chat: Deploying on Azure App Service
 
 Due to [a limitation](https://github.com/Azure/azure-dev/issues/2736) of the Azure Developer CLI (`azd`), there can be only one host option in the [azure.yaml](../azure.yaml) file.
 By default, `host: containerapp` is used and `host: appservice` is commented out.
 
-To deploy to Azure Container Apps, please follow the following steps:
+To deploy to Azure App Service, please follow the following steps:
 
 1. Comment out `host: containerapp` and uncomment `host: appservice` in the [azure.yaml](../azure.yaml) file.
 
@@ -28,7 +28,7 @@ To deploy to Azure Container Apps, please follow the following steps:
     azd env set DEPLOYMENT_TARGET appservice
     ```
 
-5. (Optional) This is the point where you can customize the deployment by setting other `azd` environment variables, in order to [use existing resources](docs/deploy_existing.md), [enable optional features (such as auth or vision)](docs/deploy_features.md), or [deploy to free tiers](docs/deploy_lowcost.md).
+5. (Optional) This is the point where you can customize the deployment by setting other `azd` environment variables, in order to [use existing resources](deploy_existing.md), [enable optional features (such as auth or vision)](deploy_features.md), or [deploy to free tiers](deploy_lowcost.md).
 6. Provision the resources and deploy the code:
 
     ```bash
